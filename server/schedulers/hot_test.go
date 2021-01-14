@@ -88,7 +88,7 @@ func (s *testHotSchedulerSuite) TestGCPendingOpInfos(c *C) {
 		for j := 0; j < len(opCreaters); j++ {
 			regionID := uint64(i*len(opCreaters) + j + 1)
 			region := newTestRegion(regionID)
-			hb.regionPendings[regionID] = [2]*operator.Operator{
+			hb.regionPendings[regionID] = [4]*operator.Operator{
 				movePeer:       opCreaters[i](region, movePeer),
 				transferLeader: opCreaters[j](region, transferLeader),
 			}

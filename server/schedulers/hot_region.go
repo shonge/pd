@@ -94,7 +94,7 @@ type hotScheduler struct {
 	// regionPendings stores regionID -> [opType]Operator
 	// this records regionID which have pending Operator by operation type. During filterHotPeers, the hot peers won't
 	// be selected if its owner region is tracked in this attribute.
-	regionPendings map[uint64][2]*operator.Operator
+	regionPendings map[uint64][4]*operator.Operator
 
 	// temporary states but exported to API or metrics
 	stLoadInfos [resourceTypeLen]map[uint64]*storeLoadDetail
@@ -114,7 +114,7 @@ func newHotScheduler(opController *schedule.OperatorController, conf *hotRegionS
 		peerLimit:      1,
 		types:          []rwType{write, read},
 		r:              rand.New(rand.NewSource(time.Now().UnixNano())),
-		regionPendings: make(map[uint64][2]*operator.Operator),
+		regionPendings: make(map[uint64][4]*operator.Operator),
 		conf:           conf,
 	}
 	for ty := resourceType(0); ty < resourceTypeLen; ty++ {
@@ -378,7 +378,7 @@ func (h *hotScheduler) addPendingInfluence(op *operator.Operator, srcStore, dstS
 	rcTy := toResourceType(rwTy, opTy)
 	h.pendings[rcTy][influence] = struct{}{}
 
-	h.regionPendings[regionID] = [2]*operator.Operator{nil, nil}
+	h.regionPendings[regionID] = [4]*operator.Operator{nil, nil}
 	{ // h.pendingOpInfos[regionID][ty] = influence
 		tmp := h.regionPendings[regionID]
 		tmp[opTy] = op
@@ -390,14 +390,20 @@ func (h *hotScheduler) addPendingInfluence(op *operator.Operator, srcStore, dstS
 }
 
 func (h *hotScheduler) balanceHotReadRegions(cluster opt.Cluster) []*operator.Operator {
-	// prefer to balance by leader
-	leaderSolver := newBalanceSolver(h, cluster, read, transferLeader)
-	ops := leaderSolver.solve()
+	peerSolver := newBalanceSolver(h, cluster, read, increasePeer)
+	ops := peerSolver.solve()
 	if len(ops) > 0 {
 		return ops
 	}
 
-	peerSolver := newBalanceSolver(h, cluster, read, movePeer)
+	// prefer to balance by leader
+	leaderSolver := newBalanceSolver(h, cluster, read, transferLeader)
+	ops = leaderSolver.solve()
+	if len(ops) > 0 {
+		return ops
+	}
+
+	peerSolver = newBalanceSolver(h, cluster, read, movePeer)
 	ops = peerSolver.solve()
 	if len(ops) > 0 {
 		return ops
@@ -509,7 +515,7 @@ func (bs *balanceSolver) isValid() bool {
 		return false
 	}
 	switch bs.opTy {
-	case movePeer, transferLeader:
+	case increasePeer, decreasePeer, movePeer, transferLeader:
 	default:
 		return false
 	}
@@ -565,6 +571,8 @@ func (bs *balanceSolver) solve() []*operator.Operator {
 // allowBalance check whether the operator count have exceed the hot region limit by type
 func (bs *balanceSolver) allowBalance() bool {
 	switch bs.opTy {
+	case increasePeer:
+		return bs.sche.allowBalanceRegion(bs.cluster)
 	case movePeer:
 		return bs.sche.allowBalanceRegion(bs.cluster)
 	case transferLeader:
@@ -670,6 +678,12 @@ func (bs *balanceSolver) isRegionAvailable(region *core.RegionInfo) bool {
 			(pendings[transferLeader] != nil && !pendings[transferLeader].IsEnd()) {
 			return false
 		}
+		if pendings[increasePeer] != nil {
+			return false
+		}
+		if pendings[decreasePeer] != nil {
+			return false
+		}
 	}
 
 	if !opt.IsHealthyAllowPending(bs.cluster, region) {
@@ -723,6 +737,14 @@ func (bs *balanceSolver) filterDstStores() map[uint64]*storeLoadDetail {
 	}
 
 	switch bs.opTy {
+	case increasePeer:
+		filters = []filter.Filter{
+			&filter.StoreStateFilter{ActionScope: bs.sche.GetName(), MoveRegion: true},
+			filter.NewExcludedFilter(bs.sche.GetName(), bs.cur.region.GetStoreIds(), bs.cur.region.GetStoreIds()),
+			filter.NewSpecialUseFilter(bs.sche.GetName(), filter.SpecialUseHotRegion),
+			filter.NewPlacementSafeguard(bs.sche.GetName(), bs.cluster, bs.cur.region, srcStore),
+		}
+
 	case movePeer:
 		filters = []filter.Filter{
 			&filter.StoreStateFilter{ActionScope: bs.sche.GetName(), MoveRegion: true},
@@ -974,6 +996,21 @@ func (bs *balanceSolver) buildOperators() ([]*operator.Operator, []Influence) {
 	)
 
 	switch bs.opTy {
+	case increasePeer:
+		srcPeer := bs.cur.region.GetStorePeer(bs.cur.srcStoreID) // checked in getRegionAndSrcPeer
+		dstPeer := &metapb.Peer{StoreId: bs.cur.dstStoreID, Role: srcPeer.Role}
+		desc := "increase-hot-" + bs.rwTy.String() + "-peer"
+		op, err = operator.CreateAddPeerOperator(
+			desc,
+			bs.cluster,
+			bs.cur.region,
+			dstPeer,
+			operator.OpHotRegion)
+
+		counters = append(counters,
+			hotDirectionCounter.WithLabelValues("increase-peer", bs.rwTy.String(), strconv.FormatUint(bs.cur.srcStoreID, 10), "out"),
+			hotDirectionCounter.WithLabelValues("increase-peer", bs.rwTy.String(), strconv.FormatUint(dstPeer.GetStoreId(), 10), "in"))
+
 	case movePeer:
 		srcPeer := bs.cur.region.GetStorePeer(bs.cur.srcStoreID) // checked in getRegionAndSrcPeer
 		dstPeer := &metapb.Peer{StoreId: bs.cur.dstStoreID, Role: srcPeer.Role}
@@ -1103,7 +1140,7 @@ func (h *hotScheduler) clearPendingInfluence() {
 		h.pendings[ty] = map[*pendingInfluence]struct{}{}
 		h.pendingSums[ty] = nil
 	}
-	h.regionPendings = make(map[uint64][2]*operator.Operator)
+	h.regionPendings = make(map[uint64][4]*operator.Operator)
 }
 
 // rwType : the perspective of balance
@@ -1130,6 +1167,8 @@ type opType int
 const (
 	movePeer opType = iota
 	transferLeader
+	increasePeer
+	decreasePeer
 )
 
 func (ty opType) String() string {
@@ -1138,6 +1177,10 @@ func (ty opType) String() string {
 		return "move-peer"
 	case transferLeader:
 		return "transfer-leader"
+	case increasePeer:
+		return "increase-peer"
+	case decreasePeer:
+		return "decrease-peer"
 	default:
 		return ""
 	}
