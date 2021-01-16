@@ -172,6 +172,7 @@ func (h *hotScheduler) allowBalanceRegion(cluster opt.Cluster) bool {
 
 func (h *hotScheduler) Schedule(cluster opt.Cluster) []*operator.Operator {
 	schedulerCounter.WithLabelValues(h.GetName(), "schedule").Inc()
+	log.Warn("call hotScheduler.Schedule(): " + time.Now().String())
 	return h.dispatch(h.types[h.r.Int()%len(h.types)], cluster)
 }
 
@@ -393,6 +394,7 @@ func (h *hotScheduler) balanceHotReadRegions(cluster opt.Cluster) []*operator.Op
 	peerSolver := newBalanceSolver(h, cluster, read, increasePeer)
 	ops := peerSolver.solve()
 	if len(ops) > 0 {
+		log.Warn("add peer!")
 		return ops
 	}
 
@@ -744,6 +746,8 @@ func (bs *balanceSolver) filterDstStores() map[uint64]*storeLoadDetail {
 			filter.NewSpecialUseFilter(bs.sche.GetName(), filter.SpecialUseHotRegion),
 			filter.NewPlacementSafeguard(bs.sche.GetName(), bs.cluster, bs.cur.region, srcStore),
 		}
+
+		candidates = bs.cluster.GetStores()
 
 	case movePeer:
 		filters = []filter.Filter{
