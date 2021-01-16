@@ -89,6 +89,8 @@ const EmptyRegionApproximateSize = 1
 
 // RegionFromHeartbeat constructs a Region from region heartbeat.
 func RegionFromHeartbeat(heartbeat *pdpb.RegionHeartbeatRequest) *RegionInfo {
+	//TODO: jchen, 从 regionHeartbeat 读取regionInfo数据
+
 	// Convert unit to MB.
 	// If region is empty or less than 1MB, use 1MB instead.
 	regionSize := heartbeat.GetApproximateSize() / (1 << 20)

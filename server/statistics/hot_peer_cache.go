@@ -15,10 +15,11 @@ package statistics
 
 import (
 	"math"
+	"sync"
 	"time"
 
-	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/pingcap/log"
+	"github.com/pingcap/kvproto/pkg/metapb"
 	"github.com/tikv/pd/pkg/movingaverage"
 	"github.com/tikv/pd/server/core"
 	"go.uber.org/zap"
@@ -52,11 +53,24 @@ var (
 	}
 )
 
+//TODO: jchen
+type regionCache struct {
+	regionId         uint64
+	leaderId         uint64
+	avgLeaderBytes   uint64
+	avgLeaderKeys    uint64
+	avgPeerBytes     uint64
+	avgPeerKeys      uint64
+	startTs          int64
+}
+
 // hotPeerCache saves the hot peer's statistics.
 type hotPeerCache struct {
 	kind           FlowKind
 	peersOfStore   map[uint64]*TopN               // storeID -> hot peers
 	storesOfRegion map[uint64]map[uint64]struct{} // regionID -> storeIDs
+	regionMap      map[uint64]regionCache          //regionId: regionCache
+	mu             sync.Mutex
 }
 
 // NewHotStoresStats creates a HotStoresStats
@@ -65,6 +79,8 @@ func NewHotStoresStats(kind FlowKind) *hotPeerCache {
 		kind:           kind,
 		peersOfStore:   make(map[uint64]*TopN),
 		storesOfRegion: make(map[uint64]map[uint64]struct{}),
+		regionMap:      make(map[uint64]regionCache),
+		mu:             sync.Mutex{},
 	}
 }
 
@@ -128,15 +144,79 @@ func (f *hotPeerCache) collectRegionMetrics(byteRate, keyRate float64, interval 
 
 // CheckRegionFlow checks the flow information of region.
 func (f *hotPeerCache) CheckRegionFlow(region *core.RegionInfo) (ret []*HotPeerStat) {
-
-	bytes := float64(f.getRegionBytes(region))
-	keys := float64(f.getRegionKeys(region))
+	bytes := f.getRegionBytes(region)
+	keys := f.getRegionKeys(region)
 
 	reportInterval := region.GetInterval()
 	interval := reportInterval.GetEndTimestamp() - reportInterval.GetStartTimestamp()
 
-	byteRate := bytes / float64(interval)
-	keyRate := keys / float64(interval)
+	//TODO: jchen, PD里需要对每个region的heartbeat做: 1.聚合 2.清理
+	// pd-heartbeat-tick-interval: 1m
+	// 现象：leader间隔很短, follower间隔很长
+	// 先打印原始版本，看看现象？
+
+
+	// 思路：每次保存一次字典里的平均值到cache里; 每隔config时间清空; 中间leader上报忽略?
+	pdHeartbeatInterval := 60
+	regionId := region.GetID()
+	isLeader := region.GetApproximateSize() == 1
+	rc, ok := f.regionMap[regionId]
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	isTimeout := false
+	now := time.Now().UnixNano()
+	if ok {
+		//超过config时间，存到cache并清空
+		if now-rc.startTs >= int64(pdHeartbeatInterval * 1e9) {
+			rc = regionCache{}
+			ok = false
+			isTimeout = true
+		}
+	}
+
+	if ok {
+		//存到hash
+		if isLeader {
+			rc.avgLeaderBytes = (rc.avgLeaderBytes+bytes)>>1
+			rc.avgLeaderKeys = (rc.avgLeaderKeys+keys)>>1
+		} else {
+			//TODO: jchen, 假设单个peer过热的概率比较小(某个peer过热或过冷怎么处理？)
+			rc.avgPeerBytes = (rc.avgPeerBytes+bytes)>>1
+			rc.avgPeerKeys = (rc.avgPeerKeys+keys)>>1
+		}
+	} else if isLeader {
+		f.regionMap[regionId] = regionCache {
+			regionId: regionId,
+			leaderId: region.GetLeader().GetId(),
+			avgLeaderBytes: bytes,
+			avgLeaderKeys: keys,
+			startTs: time.Now().UnixNano(),
+		}
+	} else {
+		return []*HotPeerStat{}
+	}
+
+	//TODO: jchen, 一个周期内，是每个peer心跳都更新是否过热，还是到周期再更新？
+	log.Info("check region flow", zap.Bool("isTimeout", isTimeout))
+	//peer不更新cache
+	if !isLeader {
+		return []*HotPeerStat{}
+	}
+
+	if rc.avgPeerBytes < 1 {
+		bytes = rc.avgLeaderBytes
+		keys = rc.avgLeaderKeys
+	} else {
+		bytes = (rc.avgLeaderBytes+rc.avgPeerBytes) >> 1
+		keys = (rc.avgLeaderKeys+rc.avgPeerKeys) >> 1
+	}
+
+	bytesF := float64(bytes)
+	keysF := float64(keys)
+	byteRate := bytesF / float64(interval)
+	keyRate := keysF / float64(interval)
 
 	f.collectRegionMetrics(byteRate, keyRate, interval)
 	// old region is in the front and new region is in the back
@@ -192,7 +272,7 @@ func (f *hotPeerCache) CheckRegionFlow(region *core.RegionInfo) (ret []*HotPeerS
 			}
 		}
 
-		newItem = f.updateHotPeerStat(newItem, oldItem, bytes, keys, time.Duration(interval)*time.Second)
+		newItem = f.updateHotPeerStat(newItem, oldItem, bytesF, keysF, time.Duration(interval))
 		if newItem != nil {
 			ret = append(ret, newItem)
 		}
@@ -299,6 +379,7 @@ func (f *hotPeerCache) getAllStoreIDs(region *core.RegionInfo) []uint64 {
 
 	// new stores
 	for _, peer := range region.GetPeers() {
+		//TODO: jchen!!!
 		// ReadFlow no need consider the followers.
 		if f.kind == ReadFlow && peer.GetStoreId() != region.GetLeader().GetStoreId() {
 			continue
@@ -359,6 +440,7 @@ func (f *hotPeerCache) isRegionHotWithAnyPeers(region *core.RegionInfo, hotDegre
 	return false
 }
 
+//TODO: jchen, 判断peer所在store的regionId，是否过热
 func (f *hotPeerCache) isRegionHotWithPeer(region *core.RegionInfo, peer *metapb.Peer, hotDegree int) bool {
 	if peer == nil {
 		return false

@@ -380,6 +380,7 @@ func (s *heartbeatServer) Recv() (*pdpb.RegionHeartbeatRequest, error) {
 }
 
 // RegionHeartbeat implements gRPC PDServer.
+//TODO: jchen, entry
 func (s *Server) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 	server := &heartbeatServer{stream: stream}
 	rc := s.GetRaftCluster()
@@ -423,6 +424,8 @@ func (s *Server) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 		}
 
 		region := core.RegionFromHeartbeat(request)
+		isLeader := region.GetApproximateSize() == 1
+
 		if region.GetLeader() == nil {
 			log.Error("invalid request, the leader is nil", zap.Reflect("request", request), errs.ZapError(errs.ErrLeaderNil))
 			regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "report", "invalid-leader").Inc()
@@ -438,7 +441,7 @@ func (s *Server) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 		}
 
 		// If the region peer count is 0, then we should not handle this.
-		if len(region.GetPeers()) == 0 {
+		if isLeader && len(region.GetPeers()) == 0 {
 			log.Warn("invalid region, zero region peer count",
 				logutil.ZapRedactStringer("region-meta", core.RegionToHexMeta(region.GetMeta())))
 			regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "report", "no-peer").Inc()
@@ -454,6 +457,10 @@ func (s *Server) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 			regionHeartbeatCounter.WithLabelValues(storeAddress, storeLabel, "report", "err").Inc()
 			msg := err.Error()
 			s.hbStreams.SendErr(pdpb.ErrorType_UNKNOWN, msg, request.GetLeader())
+			continue
+		}
+
+		if !isLeader {
 			continue
 		}
 

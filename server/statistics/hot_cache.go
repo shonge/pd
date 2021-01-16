@@ -76,6 +76,7 @@ func (w *HotCache) RegionStats(kind FlowKind, minHotDegree int) map[uint64][]*Ho
 	return nil
 }
 
+//TODO: jchen 读取这个hotRegion cache
 // RandHotRegionFromStore random picks a hot region in specify store.
 func (w *HotCache) RandHotRegionFromStore(storeID uint64, kind FlowKind, minHotDegree int) *HotPeerStat {
 	if stats, ok := w.RegionStats(kind, minHotDegree)[storeID]; ok && len(stats) > 0 {

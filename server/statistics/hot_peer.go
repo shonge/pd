@@ -64,6 +64,7 @@ func (d *dimStat) Get() float64 {
 
 // HotPeerStat records each hot peer's statistics
 type HotPeerStat struct {
+	//TODO: jchen
 	StoreID  uint64 `json:"store_id"`
 	RegionID uint64 `json:"region_id"`
 

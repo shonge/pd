@@ -533,7 +533,8 @@ func (c *RaftCluster) HandleStoreHeartbeat(stats *pdpb.StoreStats) error {
 	return nil
 }
 
-// processRegionHeartbeat updates the region information.
+// process RegionHeartbeat updates the region information.
+//TODO: jchen
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	c.RLock()
 	origin, err := c.core.PreCheckPutRegion(region)
@@ -541,9 +542,12 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 		c.RUnlock()
 		return err
 	}
+	//TODO: jchen add1 注意这里虽然是读锁，但更新了 Items
 	writeItems := c.CheckWriteStatus(region)
 	readItems := c.CheckReadStatus(region)
 	c.RUnlock()
+
+	isLeader := region.GetApproximateSize() == 1
 
 	// Save to storage if meta is updated.
 	// Save to cache if meta or leader is updated, or contains any down/pending peer.
@@ -554,6 +558,20 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 			zap.Uint64("region-id", region.GetID()),
 			logutil.ZapRedactStringer("meta-region", core.RegionToHexMeta(region.GetMeta())))
 		saveKV, saveCache, isNew = true, true, true
+	} else if !isLeader {
+		if c.traceRegionFlow &&
+			(region.GetBytesWritten() != origin.GetBytesWritten() ||
+				region.GetBytesRead() != origin.GetBytesRead() ||
+				region.GetKeysWritten() != origin.GetKeysWritten() ||
+				region.GetKeysRead() != origin.GetKeysRead()) {
+			//save peer to cache
+			c.Lock()
+			for _, readItem := range readItems {
+				c.hotStat.Update(readItem)
+			}
+			c.Unlock()
+
+		}
 	} else {
 		r := region.GetRegionEpoch()
 		o := origin.GetRegionEpoch()
@@ -679,6 +697,8 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	for _, writeItem := range writeItems {
 		c.hotStat.Update(writeItem)
 	}
+	//TODO: jchen 保存read_stat，注意这里有锁!!!
+	// 保存前要[定时]汇总/清理数据！！！
 	for _, readItem := range readItems {
 		c.hotStat.Update(readItem)
 	}
