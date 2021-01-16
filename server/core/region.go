@@ -48,7 +48,7 @@ type RegionInfo struct {
 	writtenKeys       uint64
 	readBytes         uint64
 	readKeys          uint64
-	approximateSize   int64
+	approximateSize   int64 // =1 is peer
 	approximateKeys   int64
 	interval          *pdpb.TimeInterval
 	replicationStatus *replication_modepb.RegionReplicationStatus
