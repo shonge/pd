@@ -172,9 +172,16 @@ func (f *hotPeerCache) CheckRegionFlow(region *core.RegionInfo) (ret []*HotPeerS
 	rc, ok := f.regionMap[regionId]
 
 	if !f.config.EnableFollowerRead {
+		//默认没打开开关时
+		//如果是peer数据，直接忽略
+		if !isLeader {
+			return []*HotPeerStat{}
+		}
+		//只更新leader数据
 		bytesF = float64(bytes)
 		keysF = float64(keys)
 	} else {
+		//打开follower-read开关后
 		f.mu.Lock()
 		defer f.mu.Unlock()
 
@@ -215,7 +222,7 @@ func (f *hotPeerCache) CheckRegionFlow(region *core.RegionInfo) (ret []*HotPeerS
 			return []*HotPeerStat{}
 		}
 		//TODO: jchen, 一个周期内，是每个leader心跳都更新是否过热，还是到周期再更新？
-		//peer不更新cache
+		//如果peer不更新cache, 更新map后退出
 		if !isLeader {
 			return []*HotPeerStat{}
 		}
@@ -231,7 +238,7 @@ func (f *hotPeerCache) CheckRegionFlow(region *core.RegionInfo) (ret []*HotPeerS
 		bytesF = float64(bytes)
 		keysF = float64(keys)
 	}
-
+	//leader才来到这里，此时map已更新，继续走原有逻辑
 	byteRate := bytesF / float64(interval)
 	keyRate := keysF / float64(interval)
 
