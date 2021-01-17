@@ -29,10 +29,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// HandleRegionHeartbeat processes RegionInfo reports from client.
+// Handle RegionHeartbeat processes RegionInfo reports from client.
 func (c *RaftCluster) HandleRegionHeartbeat(region *core.RegionInfo) error {
+	//TODO: jchen
 	if err := c.processRegionHeartbeat(region); err != nil {
 		return err
+	}
+
+	isLeader := region.GetApproximateSize() != 1
+	if !isLeader {
+		return nil
 	}
 
 	c.RLock()
