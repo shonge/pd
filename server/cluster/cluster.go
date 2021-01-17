@@ -547,7 +547,7 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	readItems := c.CheckReadStatus(region)
 	c.RUnlock()
 
-	isLeader := region.GetApproximateSize() == 1
+	isLeader := region.GetApproximateSize() != 1
 
 	// Save to storage if meta is updated.
 	// Save to cache if meta or leader is updated, or contains any down/pending peer.
@@ -559,19 +559,12 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 			logutil.ZapRedactStringer("meta-region", core.RegionToHexMeta(region.GetMeta())))
 		saveKV, saveCache, isNew = true, true, true
 	} else if !isLeader {
-		if c.traceRegionFlow &&
-			(region.GetBytesWritten() != origin.GetBytesWritten() ||
-				region.GetBytesRead() != origin.GetBytesRead() ||
-				region.GetKeysWritten() != origin.GetKeysWritten() ||
-				region.GetKeysRead() != origin.GetKeysRead()) {
-			//save peer to cache
-			c.Lock()
-			for _, readItem := range readItems {
-				c.hotStat.Update(readItem)
-			}
-			c.Unlock()
-
+		//save peer to cache
+		c.Lock()
+		for _, readItem := range readItems {
+			c.hotStat.Update(readItem)
 		}
+		c.Unlock()
 	} else {
 		r := region.GetRegionEpoch()
 		o := origin.GetRegionEpoch()

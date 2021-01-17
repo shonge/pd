@@ -424,7 +424,7 @@ func (s *Server) RegionHeartbeat(stream pdpb.PD_RegionHeartbeatServer) error {
 		}
 
 		region := core.RegionFromHeartbeat(request)
-		isLeader := region.GetApproximateSize() == 1
+		isLeader := region.GetApproximateSize() != 1
 
 		if region.GetLeader() == nil {
 			log.Error("invalid request, the leader is nil", zap.Reflect("request", request), errs.ZapError(errs.ErrLeaderNil))

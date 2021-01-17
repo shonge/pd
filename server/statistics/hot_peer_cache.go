@@ -15,12 +15,14 @@ package statistics
 
 import (
 	"math"
+	"os"
 	"sync"
 	"time"
 
-	"github.com/pingcap/log"
 	"github.com/pingcap/kvproto/pkg/metapb"
+	"github.com/pingcap/log"
 	"github.com/tikv/pd/pkg/movingaverage"
+	"github.com/tikv/pd/server/config"
 	"github.com/tikv/pd/server/core"
 	"go.uber.org/zap"
 )
@@ -55,13 +57,13 @@ var (
 
 //TODO: jchen
 type regionCache struct {
-	regionId         uint64
-	leaderId         uint64
-	avgLeaderBytes   uint64
-	avgLeaderKeys    uint64
-	avgPeerBytes     uint64
-	avgPeerKeys      uint64
-	startTs          int64
+	regionId       uint64
+	leaderId       uint64
+	avgLeaderBytes uint64
+	avgLeaderKeys  uint64
+	avgPeerBytes   uint64
+	avgPeerKeys    uint64
+	startTs        int64
 }
 
 // hotPeerCache saves the hot peer's statistics.
@@ -69,18 +71,23 @@ type hotPeerCache struct {
 	kind           FlowKind
 	peersOfStore   map[uint64]*TopN               // storeID -> hot peers
 	storesOfRegion map[uint64]map[uint64]struct{} // regionID -> storeIDs
-	regionMap      map[uint64]regionCache          //regionId: regionCache
+	regionMap      map[uint64]regionCache         //regionId: regionCache
 	mu             sync.Mutex
+	config         *config.Config
 }
 
 // NewHotStoresStats creates a HotStoresStats
 func NewHotStoresStats(kind FlowKind) *hotPeerCache {
+	cfg := config.NewConfig()
+	_ = cfg.Parse(os.Args[1:])
+
 	return &hotPeerCache{
 		kind:           kind,
 		peersOfStore:   make(map[uint64]*TopN),
 		storesOfRegion: make(map[uint64]map[uint64]struct{}),
 		regionMap:      make(map[uint64]regionCache),
 		mu:             sync.Mutex{},
+		config:         cfg,
 	}
 }
 
@@ -154,67 +161,77 @@ func (f *hotPeerCache) CheckRegionFlow(region *core.RegionInfo) (ret []*HotPeerS
 	// pd-heartbeat-tick-interval: 1m
 	// 现象：leader间隔很短, follower间隔很长
 	// 先打印原始版本，看看现象？
-
+	isTimeout := false
+	var bytesF, keysF float64
 
 	// 思路：每次保存一次字典里的平均值到cache里; 每隔config时间清空; 中间leader上报忽略?
-	pdHeartbeatInterval := 60
+	pdHeartbeatInterval := f.config.FollowerReadPeriod
 	regionId := region.GetID()
-	isLeader := region.GetApproximateSize() == 1
+	peerId := region.GetLeader().GetId()
+	isLeader := region.GetApproximateSize() != 1
 	rc, ok := f.regionMap[regionId]
 
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	if !f.config.EnableFollowerRead {
+		bytesF = float64(bytes)
+		keysF = float64(keys)
+	} else {
+		f.mu.Lock()
+		defer f.mu.Unlock()
 
-	isTimeout := false
-	now := time.Now().UnixNano()
-	if ok {
-		//超过config时间，存到cache并清空
-		if now-rc.startTs >= int64(pdHeartbeatInterval * 1e9) {
-			rc = regionCache{}
-			ok = false
-			isTimeout = true
+		now := time.Now().UnixNano()
+		if ok {
+			//超过config时间，清空cache
+			if now-rc.startTs >= int64(pdHeartbeatInterval*1e9) {
+				delete(f.regionMap, regionId)
+				ok = false
+				isTimeout = true
+			}
 		}
-	}
 
-	if ok {
-		//存到hash
-		if isLeader {
-			rc.avgLeaderBytes = (rc.avgLeaderBytes+bytes)>>1
-			rc.avgLeaderKeys = (rc.avgLeaderKeys+keys)>>1
+		log.Info("check region flow", zap.Uint64("peerId", peerId), zap.Uint64("regionId", regionId),
+			zap.Bool("isLeader", isLeader), zap.Bool("isTimeout", isTimeout),
+			zap.Bool("EnableFollowerRead", f.config.EnableFollowerRead),
+		)
+		if ok {
+			//存到hash
+			if isLeader {
+				rc.avgLeaderBytes = (rc.avgLeaderBytes + bytes) >> 1
+				rc.avgLeaderKeys = (rc.avgLeaderKeys + keys) >> 1
+			} else {
+				//TODO: jchen, 假设单个peer过热的概率比较小(某个peer过热或过冷怎么处理？)
+				rc.avgPeerBytes = (rc.avgPeerBytes + bytes) >> 1
+				rc.avgPeerKeys = (rc.avgPeerKeys + keys) >> 1
+			}
+			f.regionMap[regionId] = rc
+		} else if isLeader {
+			f.regionMap[regionId] = regionCache{
+				regionId:       regionId,
+				leaderId:       peerId,
+				avgLeaderBytes: bytes,
+				avgLeaderKeys:  keys,
+				startTs:        time.Now().UnixNano(),
+			}
 		} else {
-			//TODO: jchen, 假设单个peer过热的概率比较小(某个peer过热或过冷怎么处理？)
-			rc.avgPeerBytes = (rc.avgPeerBytes+bytes)>>1
-			rc.avgPeerKeys = (rc.avgPeerKeys+keys)>>1
+			return []*HotPeerStat{}
 		}
-	} else if isLeader {
-		f.regionMap[regionId] = regionCache {
-			regionId: regionId,
-			leaderId: region.GetLeader().GetId(),
-			avgLeaderBytes: bytes,
-			avgLeaderKeys: keys,
-			startTs: time.Now().UnixNano(),
+		//TODO: jchen, 一个周期内，是每个leader心跳都更新是否过热，还是到周期再更新？
+		//peer不更新cache
+		if !isLeader {
+			return []*HotPeerStat{}
 		}
-	} else {
-		return []*HotPeerStat{}
+		//聚合计算
+		if rc.avgPeerBytes < 1 {
+			bytes = rc.avgLeaderBytes
+			keys = rc.avgLeaderKeys
+		} else {
+			bytes = (rc.avgLeaderBytes + rc.avgPeerBytes) >> 1
+			keys = (rc.avgLeaderKeys + rc.avgPeerKeys) >> 1
+		}
+
+		bytesF = float64(bytes)
+		keysF = float64(keys)
 	}
 
-	//TODO: jchen, 一个周期内，是每个peer心跳都更新是否过热，还是到周期再更新？
-	log.Info("check region flow", zap.Bool("isTimeout", isTimeout))
-	//peer不更新cache
-	if !isLeader {
-		return []*HotPeerStat{}
-	}
-
-	if rc.avgPeerBytes < 1 {
-		bytes = rc.avgLeaderBytes
-		keys = rc.avgLeaderKeys
-	} else {
-		bytes = (rc.avgLeaderBytes+rc.avgPeerBytes) >> 1
-		keys = (rc.avgLeaderKeys+rc.avgPeerKeys) >> 1
-	}
-
-	bytesF := float64(bytes)
-	keysF := float64(keys)
 	byteRate := bytesF / float64(interval)
 	keyRate := keysF / float64(interval)
 

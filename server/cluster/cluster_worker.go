@@ -36,7 +36,7 @@ func (c *RaftCluster) HandleRegionHeartbeat(region *core.RegionInfo) error {
 		return err
 	}
 
-	isLeader := region.GetApproximateSize() == 1
+	isLeader := region.GetApproximateSize() != 1
 	if !isLeader {
 		return nil
 	}

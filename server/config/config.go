@@ -87,6 +87,10 @@ type Config struct {
 	// TSOSaveInterval is the interval to save timestamp.
 	TSOSaveInterval typeutil.Duration `toml:"tso-save-interval" json:"tso-save-interval"`
 
+	//TODO: jchen
+	FollowerReadPeriod int64 `toml:"follower-read-period" json:"follower-read-period"`
+	EnableFollowerRead bool  `toml:"enable-follower-read" json:"enable-follower-read"`
+
 	// The interval to update physical part of timestamp. Usually, this config should not be set.
 	// It's only useful for test purposes.
 	// This config is only valid in 50ms to 10s. If it's configured too long or too short, it will
@@ -509,6 +513,9 @@ func (c *Config) Adjust(meta *toml.MetaData, reloading bool) error {
 	}
 
 	adjustInt64(&c.LeaderLease, defaultLeaderLease)
+
+	//TODO: jchen
+	adjustInt64(&c.FollowerReadPeriod, 60)
 
 	adjustDuration(&c.TSOSaveInterval, time.Duration(defaultLeaderLease)*time.Second)
 
