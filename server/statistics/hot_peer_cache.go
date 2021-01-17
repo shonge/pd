@@ -296,7 +296,7 @@ func (f *hotPeerCache) CheckRegionFlow(region *core.RegionInfo) (ret []*HotPeerS
 			}
 		}
 
-		newItem = f.updateHotPeerStat(newItem, oldItem, bytesF, keysF, time.Duration(interval))
+		newItem = f.updateHotPeerStat(newItem, oldItem, bytesF, keysF, time.Duration(interval)*time.Second)
 		if newItem != nil {
 			ret = append(ret, newItem)
 		}
